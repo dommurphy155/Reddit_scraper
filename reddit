@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Reddit CLI Client - talks to the reddit-scrape server.
+
+Usage:
+    reddit help                              # Show help
+    reddit status                            # Check server status
+    reddit user <username> [--limit 25]      # Get user profile + posts
+    reddit subreddit <name> [--sort hot|new]  # Get subreddit posts
+    reddit post <post_id>                     # Get post + comments
+    reddit search "<query>" [--sort new]    # Search posts
+    reddit upvote <post_id>                   # Upvote a post
+    reddit downvote <post_id>                 # Downvote a post
+    reddit comment "<text>" --on <post_id>   # Comment on a post
+    reddit submit "<title>" --to <subreddit>  # Create a post
+    reddit refresh                           # Manually refresh session
+
+Examples:
+    reddit user spez --limit 50
+    reddit subreddit python --sort hot --limit 25
+    reddit post abc123
+    reddit search "machine learning" --sort new
+    reddit submit "Hello world" --to test --body "My first post"
+    reddit comment "Great post!" --on abc123
+    reddit upvote abc123
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+# Config - must match server
+DEFAULT_HOST = os.environ.get("REDDIT_SCRAPE_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("REDDIT_SCRAPE_PORT", "8766"))
+
+
+def api_call(endpoint, data=None):
+    """Make API call to server."""
+    url = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}{endpoint}"
+
+    is_post = data is not None
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(data).encode() if is_post else None,
+            headers={"Content-Type": "application/json"},
+            method="POST" if is_post else "GET"
+        )
+
+        with urllib.request.urlopen(req, timeout=300) as response:
+            return json.loads(response.read().decode())
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()
+        try:
+            error_data = json.loads(error_body)
+            print(f"Error: {error_data.get('error', 'Unknown error')}", file=sys.stderr)
+        except:
+            print(f"HTTP Error {e.code}: {error_body}", file=sys.stderr)
+        sys.exit(1)
+
+    except urllib.error.URLError as e:
+        print(f"Cannot connect to server at {DEFAULT_HOST}:{DEFAULT_PORT}", file=sys.stderr)
+        print("Is the server running? Try: sudo systemctl start reddit-scrape", file=sys.stderr)
+        sys.exit(1)
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_status(args=None):
+    """Check server status."""
+    result = api_call("/health", None)
+    print(f"Server: {'OK' if result.get('status') == 'ok' else 'ERROR'}")
+    print(f"Session exists: {result.get('session_exist', False)}")
+    print(f"Session valid: {result.get('session_valid', False)}")
+    print(f"Endpoint: {DEFAULT_HOST}:{DEFAULT_PORT}")
+
+
+def cmd_user(args):
+    """Get user profile."""
+    print(f"Fetching u/{args.username}...")
+    result = api_call("/user", {"username": args.username, "limit": args.limit})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print(f"✓ Saved to: {result['path']}")
+    print(f"  Posts: {result['posts_count']}")
+
+
+def cmd_subreddit(args):
+    """Get subreddit posts."""
+    print(f"Fetching r/{args.name} (sort: {args.sort})...")
+    result = api_call("/subreddit", {"name": args.name, "sort": args.sort, "limit": args.limit})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print(f"✓ Saved to: {result['path']}")
+    print(f"  Posts: {result['posts_count']}")
+
+
+def cmd_post(args):
+    """Get post with comments."""
+    print(f"Fetching post {args.post_id}...")
+    result = api_call("/post", {"post_id": args.post_id})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print(f"✓ Saved to: {result['path']}")
+    print(f"  Comments: {result['comments_count']}")
+
+
+def cmd_search(args):
+    """Search posts."""
+    print(f"Searching: {args.query}")
+    result = api_call("/search", {"query": args.query, "sort": args.sort, "limit": args.limit})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print(f"✓ Found: {result['posts_count']} posts")
+    print(f"  Saved to: {result['path']}")
+
+    if result.get('posts'):
+        print("\n--- Top Results ---")
+        for p in result['posts'][:5]:
+            title = p.get('title', 'N/A')[:60]
+            sub = p.get('subreddit', 'N/A')
+            score = p.get('score', 0)
+            print(f"\n  [{sub}] {title}...")
+            print(f"     Score: {score} | Comments: {p.get('num_comments', 0)}")
+
+
+def cmd_upvote(args):
+    """Upvote a post."""
+    print(f"Upvoting {args.post_id}...")
+    result = api_call("/upvote", {"post_id": args.post_id})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print("✓ Upvoted!")
+
+
+def cmd_downvote(args):
+    """Downvote a post."""
+    print(f"Downvoting {args.post_id}...")
+    result = api_call("/downvote", {"post_id": args.post_id})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print("✓ Downvoted!")
+
+
+def cmd_comment(args):
+    """Comment on a post."""
+    print(f"Commenting on {args.post_id}...")
+    result = api_call("/comment", {"post_id": args.post_id, "text": args.text})
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print(f"✓ Commented! ID: {result.get('comment_id', 'N/A')}")
+
+
+def cmd_submit(args):
+    """Submit a post."""
+    print(f"Submitting to r/{args.subreddit}...")
+    data = {
+        "subreddit": args.subreddit,
+        "title": args.title,
+        "body": args.body,
+        "url": args.url,
+    }
+    result = api_call("/submit", data)
+
+    if result.get('_meta', {}).get('refreshed'):
+        print("  ⚠️  Session expired, refreshing...")
+        print("  ✓  Refreshed!")
+
+    print(f"✓ Posted! ID: {result['post_id']}")
+    print(f"  URL: {result['url']}")
+
+
+def cmd_refresh(args=None):
+    """Manually refresh session."""
+    print("Refreshing session...")
+    result = api_call("/refresh", {})
+    print(result.get('message', 'Done'))
+
+
+def cmd_help():
+    """Show help."""
+    print(__doc__)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Reddit CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  reddit user spez --limit 50
+  reddit subreddit python --sort hot --limit 25
+  reddit post abc123
+  reddit search "machine learning" --sort new
+  reddit submit "Hello world" --to test --body "My first post"
+  reddit comment "Great post!" --on abc123
+  reddit upvote abc123
+  reddit refresh
+        """
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # Status
+    subparsers.add_parser("status", help="Check server status")
+
+    # User
+    user_parser = subparsers.add_parser("user", help="Get user profile + posts")
+    user_parser.add_argument("username", help="Reddit username")
+    user_parser.add_argument("--limit", "-l", type=int, default=25, help="Post limit")
+
+    # Subreddit
+    sub_parser = subparsers.add_parser("subreddit", help="Get subreddit posts")
+    sub_parser.add_argument("name", help="Subreddit name (without r/)")
+    sub_parser.add_argument("--sort", "-s", choices=["hot", "new", "top", "rising"], default="hot")
+    sub_parser.add_argument("--limit", "-l", type=int, default=25)
+
+    # Post
+    post_parser = subparsers.add_parser("post", help="Get post + comments")
+    post_parser.add_argument("post_id", help="Post ID")
+
+    # Search
+    search_parser = subparsers.add_parser("search", help="Search posts")
+    search_parser.add_argument("query", help="Search query")
+    search_parser.add_argument("--sort", "-s", choices=["relevance", "new", "hot", "top"], default="relevance")
+    search_parser.add_argument("--limit", "-l", type=int, default=25)
+
+    # Upvote
+    upvote_parser = subparsers.add_parser("upvote", help="Upvote a post")
+    upvote_parser.add_argument("post_id", help="Post ID")
+
+    # Downvote
+    downvote_parser = subparsers.add_parser("downvote", help="Downvote a post")
+    downvote_parser.add_argument("post_id", help="Post ID")
+
+    # Comment
+    comment_parser = subparsers.add_parser("comment", help="Comment on a post")
+    comment_parser.add_argument("text", help="Comment text")
+    comment_parser.add_argument("--on", "-o", required=True, dest="post_id", help="Post ID")
+
+    # Submit
+    submit_parser = subparsers.add_parser("submit", help="Create a post")
+    submit_parser.add_argument("title", help="Post title")
+    submit_parser.add_argument("--to", "-t", required=True, dest="subreddit", help="Subreddit")
+    submit_parser.add_argument("--body", "-b", help="Selftext (for text posts)")
+    submit_parser.add_argument("--url", "-u", help="URL (for link posts)")
+
+    # Refresh
+    subparsers.add_parser("refresh", help="Manually refresh session")
+
+    # Help
+    subparsers.add_parser("help", help="Show help")
+
+    args = parser.parse_args()
+
+    if not args.command or args.command == "help":
+        cmd_help()
+        return
+
+    commands = {
+        "status": cmd_status,
+        "user": cmd_user,
+        "subreddit": cmd_subreddit,
+        "post": cmd_post,
+        "search": cmd_search,
+        "upvote": cmd_upvote,
+        "downvote": cmd_downvote,
+        "comment": cmd_comment,
+        "submit": cmd_submit,
+        "refresh": cmd_refresh,
+    }
+
+    handler = commands.get(args.command)
+    if handler:
+        handler(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,17 @@
+[Unit]
+Description=Reddit Scraper API Server with Auto Auth Refresh
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/skills/reddit_scrape
+Environment="REDDIT_SESSION_PATH=%h/.openclaw/skills/reddit_scrape/reddit_session.json"
+Environment="REDDIT_SCRAPE_HOST=127.0.0.1"
+Environment="REDDIT_SCRAPE_PORT=8766"
+Environment="PLAYWRIGHT_BROWSERS_PATH=0"
+ExecStart=%h/.openclaw/skills/reddit_scrape/venv/bin/python %h/.openclaw/skills/reddit_scrape/server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
