@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Reddit Scrape Setup Wizard
-Installs and configures the reddit_scrape skill with systemd service.
+Reddit Scrape Setup Wizard - Fully Automated
+Creates venv, installs deps, sets up cookies, installs systemd service.
 """
 
 import os
@@ -10,315 +10,213 @@ import json
 import subprocess
 import time
 import shutil
+import socket
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
     GREEN = '\033[92m'
     WARNING = '\033[93m'
     FAIL = '\033[91m'
+    CYAN = '\033[96m'
     END = '\033[0m'
     BOLD = '\033[1m'
 
 
-def print_colored(text: str, color: str = ""):
-    """Print colored text."""
-    if color:
-        print(f"{color}{text}{Colors.END}")
-    else:
-        print(text)
+def printc(text: str, color: str = ""):
+    print(f"{color}{text}{Colors.END}" if color else text)
 
 
-def print_step(step_num: int, total: int, description: str):
-    """Print a step header."""
-    print()
-    print_colored(f"{'='*60}", Colors.CYAN)
-    print_colored(f"  STEP {step_num}/{total}: {description}", Colors.BOLD + Colors.CYAN)
-    print_colored(f"{'='*60}", Colors.CYAN)
-    print()
-
-
-def run_command(cmd: List[str], capture: bool = True, check: bool = True, sudo: bool = False, cwd: str = None) -> Tuple[int, str, str]:
-    """Run a shell command and return exit code, stdout, stderr."""
+def run(cmd: List[str], capture: bool = True, sudo: bool = False, cwd: str = None, timeout: int = 60) -> Tuple[int, str, str]:
     if sudo and os.geteuid() != 0:
         cmd = ['sudo'] + cmd
-
     try:
-        if capture:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                cwd=cwd
-            )
-            return result.returncode, result.stdout, result.stderr
-        else:
-            result = subprocess.run(cmd, check=check, cwd=cwd)
-            return result.returncode, "", ""
+        result = subprocess.run(cmd, capture_output=capture, text=True, cwd=cwd, timeout=timeout)
+        return result.returncode, result.stdout, result.stderr
     except Exception as e:
         return 1, "", str(e)
 
 
-def prompt_user(message: str, default: str = "") -> str:
-    """Prompt user for input with optional default value."""
-    if default:
-        response = input(f"{message} [{default}]: ").strip()
-        return response if response else default
-    return input(f"{message}: ").strip()
-
-
-def confirm(message: str) -> bool:
-    """Ask for yes/no confirmation."""
-    while True:
-        response = input(f"{message} (yes/no): ").strip().lower()
-        if response in ('y', 'yes'):
-            return True
-        if response in ('n', 'no'):
-            return False
-        print("Please answer 'yes' or 'no'.")
-
-
-def check_python_version() -> bool:
-    """Check if Python 3.10+ is installed."""
-    version = sys.version_info
-    if version.major < 3 or (version.major == 3 and version.minor < 10):
-        print_colored(f"Python {version.major}.{version.minor} found. Python 3.10+ required.", Colors.FAIL)
-        return False
-    print_colored(f"Python {version.major}.{version.minor}.{version.micro} - OK", Colors.GREEN)
-    return True
-
-
 def get_skill_dir() -> Path:
-    """Get the skill directory."""
-    return Path.home() / ".openclaw" / "skills" / "reddit_scrape"
+    return Path(__file__).parent.resolve()
 
 
-def get_venv_path() -> Path:
-    """Get or create Python virtual environment."""
+def find_python() -> Optional[Path]:
+    for py in ['python3.12', 'python3.11', 'python3.10', 'python3']:
+        code, out, _ = run([py, '--version'], capture=True)
+        if code == 0:
+            try:
+                ver = out.strip().split()[1]
+                major, minor = map(int, ver.split('.')[:2])
+                if major == 3 and minor >= 10:
+                    which_path = shutil.which(py)
+                    if which_path:
+                        return Path(which_path)
+                    return Path(f'/usr/bin/{py}')
+            except:
+                pass
+    return None
+
+
+def find_existing_venv() -> Optional[Path]:
+    home = Path.home()
     skill_dir = get_skill_dir()
-    venv_path = skill_dir / "venv"
 
-    # Check if venv exists (could be a symlink)
-    if venv_path.exists() or venv_path.is_symlink():
-        return venv_path
+    search_paths = [
+        home / ".openclaw" / "skills" / "twitter_scrape" / "venv",
+        home / ".openclaw" / "skills" / "reddit_scrape" / "venv",
+        home / ".openclaw" / "skills" / "ebay_scrape" / "venv",
+        home / "venv",
+        home / ".venv",
+        Path("/opt/venv"),
+        Path("/var/venv"),
+        skill_dir.parent / "venv",
+        skill_dir.parent / ".venv",
+    ]
 
-    # Check if twitter_scrape venv exists (can be reused)
-    twitter_venv = Path.home() / ".openclaw" / "skills" / "twitter_scrape" / "venv"
-    if twitter_venv.exists():
-        print("Linking to existing Twitter scrape virtual environment...")
-        venv_path.symlink_to(twitter_venv)
-        return venv_path
+    env_venv = os.environ.get('VIRTUAL_ENV')
+    if env_venv:
+        search_paths.insert(0, Path(env_venv))
 
-    print("Creating Python virtual environment...")
-    run_command([sys.executable, "-m", "venv", str(venv_path)], check=True)
-    return venv_path
+    for venv_path in search_paths:
+        if not venv_path.exists():
+            continue
+        python_exe = venv_path / "bin" / "python"
+        if not python_exe.exists():
+            python_exe = venv_path / "Scripts" / "python.exe"
+        if python_exe.exists():
+            code, out, _ = run([str(python_exe), '--version'], capture=True)
+            if code == 0:
+                try:
+                    ver = out.strip().split()[1]
+                    major, minor = map(int, ver.split('.')[:2])
+                    if major == 3 and minor >= 10:
+                        printc(f"Found existing venv: {venv_path} (Python {ver})", Colors.CYAN)
+                        return python_exe
+                except:
+                    pass
+    return None
 
 
-def get_venv_python() -> Path:
-    """Get the Python executable path in the virtual environment."""
-    venv = get_venv_path()
-    return venv / "bin" / "python"
+def setup_venv(skill_dir: Path) -> Path:
+    venv = skill_dir / "venv"
+    python = venv / "bin" / "python"
 
+    if venv.exists() and python.exists():
+        code, out, _ = run([str(python), '--version'], capture=True)
+        if code == 0:
+            try:
+                ver = out.strip().split()[1]
+                major, minor = map(int, ver.split('.')[:2])
+                if major == 3 and minor >= 10:
+                    printc(f"Using existing venv: {venv}", Colors.GREEN)
+                    return python
+            except:
+                pass
 
-def get_venv_pip() -> Path:
-    """Get the pip executable path in the virtual environment."""
-    venv = get_venv_path()
-    return venv / "bin" / "pip"
+    existing_python = find_existing_venv()
+    if existing_python:
+        printc(f"Linking to existing venv: {existing_python.parent.parent}", Colors.CYAN)
+        if venv.exists():
+            venv.unlink() if venv.is_symlink() else shutil.rmtree(venv)
+        venv.symlink_to(existing_python.parent.parent)
+        return existing_python
 
+    py = find_python()
+    if not py:
+        printc("Python 3.10+ not found. Install python3.10 or higher.", Colors.FAIL)
+        sys.exit(1)
 
-def check_and_install_dependencies() -> bool:
-    """Check and install required Python packages."""
-    pip = get_venv_pip()
-    python = get_venv_python()
-
-    # Ensure venv exists
-    get_venv_path()
-
-    required_packages = ['rnet', 'playwright', 'playwright-stealth', 'xvfbwrapper']
-
-    print("Checking dependencies...")
-    for package in required_packages:
-        print(f"  Installing {package}...")
-        code, out, err = run_command([str(pip), 'install', package, '--pre'] if package == 'rnet' else [str(pip), 'install', package])
-        if code != 0:
-            print_colored(f"  Failed to install {package}: {err}", Colors.WARNING)
-
-    # Install Playwright browsers
-    print("  Installing Playwright Chromium browser...")
-    code, out, err = run_command([str(python), '-m', 'playwright', 'install', 'chromium'])
+    printc(f"Creating venv with {py}...", Colors.CYAN)
+    code, _, err = run([str(py), '-m', 'venv', str(venv)])
     if code != 0:
-        print_colored(f"  Failed to install Chromium: {err}", Colors.WARNING)
-        return False
+        printc(f"Failed to create venv: {err}", Colors.FAIL)
+        sys.exit(1)
 
-    print_colored("Dependencies installed successfully.", Colors.GREEN)
-    return True
+    return python
 
 
-def setup_credentials() -> bool:
-    """Set up Reddit credentials."""
-    skill_dir = get_skill_dir()
-    config_path = skill_dir / ".reddit_config.json"
+def install_deps(python: Path):
+    pip = python.parent / "pip"
+    printc("Installing dependencies (this may take a few minutes)...", Colors.CYAN)
 
-    print_colored("Reddit credentials are required for automatic session refresh.", Colors.CYAN)
-    print("These will be stored in .reddit_config.json (not committed to git).")
-    print()
+    deps = ['rnet', 'playwright', 'playwright-stealth', 'xvfbwrapper']
+    for pkg in deps:
+        printc(f" Installing {pkg}...", Colors.CYAN)
+        args = [str(pip), 'install', pkg, '--pre'] if pkg == 'rnet' else [str(pip), 'install', pkg]
+        run(args, capture=True)
 
-    if config_path.exists():
-        print_colored("Existing credentials found.", Colors.GREEN)
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-            print(f"  Username: {config.get('username', 'N/A')}")
-            if confirm("Use existing credentials?"):
-                return True
-        except:
-            pass
+    printc("Installing Chromium...", Colors.CYAN)
+    run([str(python), '-m', 'playwright', 'install', 'chromium'], capture=True)
+    printc("Dependencies installed.", Colors.GREEN)
 
-    print()
-    print("Enter your Reddit credentials:")
-    username = prompt_user("Reddit username")
-    password = prompt_user("Reddit password")
 
-    if not username or not password:
-        print_colored("Username and password are required.", Colors.FAIL)
-        return False
-
-    config = {
-        "username": username,
-        "password": password
-    }
-
+def is_chrome_debug_port_open() -> bool:
     try:
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
-        # Set restrictive permissions
-        os.chmod(config_path, 0o600)
-        print_colored(f"Credentials saved to {config_path}", Colors.GREEN)
-        return True
-    except Exception as e:
-        print_colored(f"Failed to save credentials: {e}", Colors.FAIL)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(('127.0.0.1', 9222))
+        sock.close()
+        return result == 0
+    except:
         return False
 
 
-def setup_session() -> bool:
-    """Set up Reddit session cookies."""
-    skill_dir = get_skill_dir()
-    session_path = skill_dir / "reddit_session.json"
+def start_chrome_debug():
+    printc("\nChrome debugging port 9222 not found.", Colors.WARNING)
+    printc("Please start Chrome with remote debugging:", Colors.CYAN)
+    printc("\n  google-chrome --remote-debugging-port=9222 &", Colors.BOLD)
+    printc("\nOr if already running, restart it with the flag.", Colors.CYAN)
 
-    print_step(0, 0, "Session Setup")  # Inline step
-    print_colored("Reddit session cookies are needed for scraping.", Colors.CYAN)
-    print()
+    resp = input("\nHave you started Chrome with debugging? [y/N]: ").strip().lower()
+    if resp != 'y':
+        printc("Cannot continue without Chrome debugging port.", Colors.FAIL)
+        sys.exit(1)
 
-    if session_path.exists():
-        print_colored("Existing session found.", Colors.GREEN)
-        if confirm("Keep existing session?"):
+    for i in range(10):
+        if is_chrome_debug_port_open():
+            printc("Chrome debugging port detected.", Colors.GREEN)
             return True
+        time.sleep(1)
 
-    print()
-    print_colored("Choose session setup method:", Colors.CYAN)
-    print()
-    print("  [1] Extract from Chrome (if logged in to Reddit in Chrome)")
-    print("  [2] Manual entry (copy from browser DevTools)")
-    print("  [3] Skip (you can set up later)")
-    print()
-
-    choice = prompt_user("Enter choice", "2")
-
-    if choice == "1":
-        return extract_cookies_from_browser()
-    elif choice == "2":
-        return manual_cookie_entry()
-    else:
-        print("Session setup skipped. You can run it later with:")
-        print(f"  python3 {skill_dir}/get_cookies.py")
-        print(f"  or manually create {session_path}")
-        return True
+    printc("Chrome debugging port still not available.", Colors.FAIL)
+    sys.exit(1)
 
 
-def extract_cookies_from_browser() -> bool:
-    """Try to extract cookies from Chrome."""
-    skill_dir = get_skill_dir()
-    get_cookies_script = skill_dir / "get_cookies.py"
+def get_cookies_manual(skill_dir: Path) -> bool:
+    printc("\n=== Cookie Setup ===", Colors.CYAN)
+    printc("1. Open Chrome and log into reddit.com")
+    printc("2. Press F12 -> Application -> Cookies -> https://www.reddit.com")
+    printc("3. Copy these cookies:\n")
 
-    print()
-    print("Attempting to extract cookies from Chrome...")
-    code, out, err = run_command([str(get_venv_python()), str(get_cookies_script)], cwd=str(skill_dir))
+    reddit_session = input("reddit_session (JWT starting eyJ...): ").strip()
+    token_v2 = input("token_v2 (JWT starting eyJ...): ").strip()
+    csrf = input("csrf_token (hex string): ").strip()
 
-    if code == 0 and "Successfully extracted" in out:
-        print_colored("Cookies extracted successfully!", Colors.GREEN)
-        return True
-    else:
-        print_colored("Automatic extraction failed.", Colors.WARNING)
-        print("Falling back to manual entry...")
-        return manual_cookie_entry()
-
-
-def manual_cookie_entry() -> bool:
-    """Prompt user to manually enter cookies."""
-    skill_dir = get_skill_dir()
-    session_path = skill_dir / "reddit_session.json"
-
-    print()
-    print_colored("Manual Cookie Entry", Colors.CYAN)
-    print()
-    print("Instructions:")
-    print("  1. Open Chrome and log into Reddit (https://www.reddit.com)")
-    print("  2. Press F12 to open DevTools")
-    print("  3. Go to Application → Cookies → https://www.reddit.com")
-    print("  4. Copy the following cookies:")
-    print()
-    print("     • reddit_session (long JWT token starting with eyJ...)")
-    print("     • token_v2       (long JWT token starting with eyJ...)")
-    print("     • csrf_token     (short hex string like 76d873...)")
-    print()
-
-    reddit_session = prompt_user("Enter reddit_session")
-    token_v2 = prompt_user("Enter token_v2")
-    csrf_token = prompt_user("Enter csrf_token")
-
-    if not reddit_session or not token_v2 or not csrf_token:
-        print_colored("All three cookies are required.", Colors.FAIL)
+    if not all([reddit_session, token_v2, csrf]):
+        printc("All cookies required.", Colors.FAIL)
         return False
 
     cookies = [
         {"name": "reddit_session", "value": reddit_session},
         {"name": "token_v2", "value": token_v2},
-        {"name": "csrf_token", "value": csrf_token}
+        {"name": "csrf_token", "value": csrf}
     ]
 
-    try:
-        with open(session_path, 'w') as f:
-            json.dump(cookies, f, indent=2)
-        print_colored(f"Session saved to {session_path}", Colors.GREEN)
-        return True
-    except Exception as e:
-        print_colored(f"Failed to save session: {e}", Colors.FAIL)
-        return False
+    session_path = skill_dir / "reddit_session.json"
+    with open(session_path, 'w') as f:
+        json.dump(cookies, f, indent=2)
+    os.chmod(session_path, 0o600)
+    printc(f"Session saved.", Colors.GREEN)
+    return True
 
 
-def install_systemd_service() -> bool:
-    """Install systemd service for reddit-scrape."""
-    skill_dir = get_skill_dir()
-    user = os.environ.get('SUDO_USER') or os.environ.get('USER') or 'root'
+def install_service(skill_dir: Path, python: Path):
+    user = os.environ.get('SUDO_USER') or os.environ.get('USER') or os.getlogin()
 
-    print("Installing systemd service...")
-
-    # Check if running with sudo
-    if os.geteuid() != 0:
-        print_colored("This step requires sudo privileges.", Colors.WARNING)
-        print("Running install-service.sh with sudo...")
-        install_script = skill_dir / "install-service.sh"
-        code, out, err = run_command(['bash', str(install_script)], sudo=True, capture=False)
-        return code == 0
-
-    # We're already root, install directly
-    service_content = f"""[Unit]
-Description=Reddit Scraper API Server with Auto Auth Refresh
+    service = f"""[Unit]
+Description=Reddit Scraper API
 After=network.target
 
 [Service]
@@ -329,7 +227,7 @@ Environment="REDDIT_SESSION_PATH={skill_dir}/reddit_session.json"
 Environment="REDDIT_SCRAPE_HOST=127.0.0.1"
 Environment="REDDIT_SCRAPE_PORT=8766"
 Environment="PLAYWRIGHT_BROWSERS_PATH=0"
-ExecStart={skill_dir}/venv/bin/python {skill_dir}/server.py
+ExecStart={python} {skill_dir}/server.py
 Restart=always
 RestartSec=10
 
@@ -337,197 +235,131 @@ RestartSec=10
 WantedBy=multi-user.target
 """
 
-    service_path = Path("/etc/systemd/system/reddit-scrape.service")
+    temp = Path("/tmp/reddit-scrape.service")
+    temp.write_text(service)
 
-    try:
-        with open(service_path, 'w') as f:
-            f.write(service_content)
-
-        run_command(['systemctl', 'daemon-reload'], check=True)
-        run_command(['systemctl', 'enable', 'reddit-scrape'], check=True)
-
-        print_colored("Systemd service installed successfully.", Colors.GREEN)
-        return True
-    except Exception as e:
-        print_colored(f"Failed to install service: {e}", Colors.FAIL)
-        return False
-
-
-def start_service() -> bool:
-    """Start the reddit-scrape service."""
-    print("Starting reddit-scrape service...")
-
-    code, out, err = run_command(['systemctl', 'start', 'reddit-scrape'], sudo=True)
+    code, _, err = run(['cp', str(temp), '/etc/systemd/system/reddit-scrape.service'], sudo=True)
     if code != 0:
-        print_colored(f"Failed to start service: {err}", Colors.FAIL)
+        printc(f"Failed to install service: {err}", Colors.FAIL)
         return False
 
-    # Wait a moment for service to initialize
+    run(['systemctl', 'daemon-reload'], sudo=True)
+    run(['systemctl', 'enable', 'reddit-scrape'], sudo=True)
+    printc("Service installed.", Colors.GREEN)
+    return True
+
+
+def start_service():
+    printc("Starting service...", Colors.CYAN)
+    run(['systemctl', 'stop', 'reddit-scrape'], sudo=True, capture=True)
+    time.sleep(1)
+    run(['systemctl', 'start', 'reddit-scrape'], sudo=True)
     time.sleep(3)
 
-    # Check status
-    code, out, err = run_command(['systemctl', 'is-active', 'reddit-scrape'], check=False)
-    if code == 0 and 'active' in out:
-        print_colored("Service is active.", Colors.GREEN)
+    code, out, _ = run(['systemctl', 'is-active', 'reddit-scrape'], sudo=True)
+    if 'active' in out:
+        printc("Service running.", Colors.GREEN)
         return True
-    else:
-        print_colored("Service may not be fully started yet.", Colors.WARNING)
-        return True  # Don't fail - it might still be starting
-
-
-def test_installation() -> bool:
-    """Test the installation by calling the health endpoint."""
-    import urllib.request
-    import urllib.error
-
-    print()
-    print("Testing installation...")
-
-    host = "127.0.0.1"
-    port = 8766
-
-    # Try a few times with delay
-    for attempt in range(3):
-        try:
-            req = urllib.request.Request(f"http://{host}:{port}/health")
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-
-                print()
-                print_colored("Installation Test Results:", Colors.CYAN)
-                print(f"  Server status: {'OK' if data.get('status') == 'ok' else 'ERROR'}")
-                print(f"  Session exists: {data.get('session_exists', False)}")
-                print(f"  Session valid: {data.get('session_valid', False)}")
-                print(f"  Endpoint: {data.get('endpoint', 'N/A')}")
-
-                if data.get('status') == 'ok':
-                    print_colored("\n✓ Installation successful!", Colors.GREEN)
-                    return True
-                else:
-                    print_colored("\n⚠ Server running but not healthy", Colors.WARNING)
-                    return False
-
-        except urllib.error.URLError as e:
-            if attempt < 2:
-                print(f"  Attempt {attempt + 1}/3: Server not ready, waiting...")
-                time.sleep(3)
-            else:
-                print_colored(f"\n✗ Cannot connect to server: {e}", Colors.FAIL)
-                print("The service may still be starting. Check status with:")
-                print("  sudo systemctl status reddit-scrape")
-                return False
-        except Exception as e:
-            print_colored(f"\n✗ Test failed: {e}", Colors.FAIL)
-            return False
-
     return False
 
 
-def show_completion_message():
-    """Show the completion message with usage instructions."""
-    skill_dir = get_skill_dir()
+def test_server():
+    import urllib.request
+    for i in range(5):
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8766/health")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read().decode())
+                if data.get('status') == 'ok':
+                    printc("Server is healthy.", Colors.GREEN)
+                    return True
+        except:
+            time.sleep(2)
+    return False
 
-    print_colored("""
-╔════════════════════════════════════════════════════════════╗
-║           Reddit Scrape Setup Complete!                    ║
-╠════════════════════════════════════════════════════════════╣
-║                                                            ║
-║  Your Reddit scraper is now ready to use.                  ║
-║                                                            ║
-║  Available commands:                                       ║
-║    reddit status              - Check server status          ║
-║    reddit user <username>     - Get user profile             ║
-║    reddit subreddit <name>    - Get subreddit posts          ║
-║    reddit post <id>           - Get post with comments       ║
-║    reddit search "query"      - Search posts                 ║
-║    reddit upvote <id>         - Upvote a post                ║
-║    reddit downvote <id>       - Downvote a post              ║
-║    reddit comment "text"      - Comment on a post              ║
-║    reddit submit "title"      - Create a post                  ║
-║    reddit refresh             - Force session refresh        ║
-║                                                            ║
-║  Service management:                                         ║
-║    sudo systemctl status reddit-scrape                       ║
-║    sudo systemctl restart reddit-scrape                      ║
-║    sudo journalctl -u reddit-scrape -f                       ║
-║                                                            ║
-║  Configuration files:                                        ║
-║    {skill_dir}/.reddit_config.json  - Credentials            ║
-║    {skill_dir}/reddit_session.json  - Auth cookies           ║
-║                                                            ║
-╚════════════════════════════════════════════════════════════╝
-""".format(skill_dir=skill_dir), Colors.GREEN)
+
+def create_cli_symlink(skill_dir: Path):
+    local_bin = Path.home() / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+
+    reddit_cli = skill_dir / "reddit"
+    link = local_bin / "reddit"
+
+    if link.exists() or link.is_symlink():
+        link.unlink()
+
+    if reddit_cli.exists():
+        link.symlink_to(reddit_cli)
+        printc(f"CLI available at {link}", Colors.GREEN)
+
+    for profile in [Path.home() / ".bashrc", Path.home() / ".zshrc"]:
+        if profile.exists():
+            content = profile.read_text()
+            if '.local/bin' not in content:
+                with open(profile, 'a') as f:
+                    f.write('\nexport PATH="$HOME/.local/bin:$PATH"\n')
 
 
 def main():
-    """Main wizard flow."""
-    total_steps = 6
-
-    # Print welcome banner
-    print_colored("""
-╔════════════════════════════════════════════════════════════╗
-║                                                            ║
-║         Reddit Scrape Setup Wizard                         ║
-║         Installs and configures reddit_scrape skill        ║
-║                                                            ║
-╚════════════════════════════════════════════════════════════╝
-""", Colors.CYAN + Colors.BOLD)
-
     skill_dir = get_skill_dir()
-    if not skill_dir.exists():
-        print_colored(f"Error: Skill directory not found at {skill_dir}", Colors.FAIL)
-        sys.exit(1)
+    printc("="*60, Colors.CYAN)
+    printc(" Reddit Scrape Setup", Colors.BOLD + Colors.CYAN)
+    printc("="*60, Colors.CYAN)
 
-    # STEP 1: Check Python version
-    print_step(1, total_steps, "Check Python Version")
-    if not check_python_version():
-        print_colored("Please install Python 3.10 or higher.", Colors.FAIL)
-        sys.exit(1)
+    # Step 1: Setup venv
+    python = setup_venv(skill_dir)
+    printc(f"Using Python: {python}", Colors.GREEN)
 
-    # STEP 2: Install dependencies
-    print_step(2, total_steps, "Install Dependencies")
-    if not check_and_install_dependencies():
-        print_colored("Some dependencies failed to install. Continuing anyway...", Colors.WARNING)
+    # Step 2: Install deps
+    install_deps(python)
 
-    # STEP 3: Set up credentials
-    print_step(3, total_steps, "Configure Reddit Credentials")
-    if not setup_credentials():
-        if not confirm("Continue without credentials?"):
-            sys.exit(0)
-
-    # STEP 4: Set up session
-    if not setup_session():
-        print_colored("Session setup incomplete. You can complete it later.", Colors.WARNING)
-
-    # STEP 5: Install systemd service
-    print_step(5, total_steps, "Install Systemd Service")
-    if not install_systemd_service():
-        print_colored("Failed to install systemd service. You may need to run:", Colors.WARNING)
-        print(f"  sudo bash {skill_dir}/install-service.sh")
-
-    # STEP 6: Start service and test
-    print_step(6, total_steps, "Start Service & Test")
-    if start_service():
-        test_installation()
+    # Step 3: Check Chrome debugging port
+    if not is_chrome_debug_port_open():
+        start_chrome_debug()
     else:
-        print_colored("Service failed to start. Check logs with:", Colors.WARNING)
-        print("  sudo journalctl -u reddit-scrape -n 50")
+        printc("Chrome debugging port 9222 is active.", Colors.GREEN)
 
-    # Show completion message
-    show_completion_message()
+    # Step 4: Get cookies (manual only)
+    session_path = skill_dir / "reddit_session.json"
+    if session_path.exists():
+        printc("Existing session found.", Colors.GREEN)
+        resp = input("Update cookies? [y/N]: ").strip().lower()
+        if resp == 'y':
+            if not get_cookies_manual(skill_dir):
+                printc("Cookie setup failed.", Colors.FAIL)
+                sys.exit(1)
+    else:
+        if not get_cookies_manual(skill_dir):
+            printc("Cookie setup failed.", Colors.FAIL)
+            sys.exit(1)
 
-    sys.exit(0)
+    # Step 5: Install systemd service
+    if install_service(skill_dir, python):
+        start_service()
+        test_server()
+
+    # Step 6: Create CLI symlink
+    create_cli_symlink(skill_dir)
+
+    printc("\n" + "="*60, Colors.GREEN)
+    printc(" Setup Complete!", Colors.BOLD + Colors.GREEN)
+    printc("="*60, Colors.GREEN)
+    printc("\nCommands:", Colors.CYAN)
+    printc(" reddit status - Check server")
+    printc(" reddit user <name> - Get user profile")
+    printc(" reddit subreddit <name> - Get posts")
+    printc("\nService:", Colors.CYAN)
+    printc(" sudo systemctl status reddit-scrape")
+    printc("="*60, Colors.GREEN)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print_colored("\n\nWizard interrupted. You can re-run with:", Colors.WARNING)
-        print_colored(f"  python3 {get_skill_dir()}/setup_wizard.py", Colors.CYAN)
+        printc("\nInterrupted.", Colors.WARNING)
         sys.exit(0)
     except Exception as e:
-        print_colored(f"\n\nError: {e}", Colors.FAIL)
+        printc(f"\nError: {e}", Colors.FAIL)
         import traceback
         traceback.print_exc()
-        sys.exit(1)
